@@ -13,7 +13,7 @@ export function createDeepgramStream(onTranscript: (text: string) => void) {
           Authorization: `Token ${DEEPGRAM_KEY}`,
         },
       }
-    );
+    )
 
     dgSocket.on("open", () => {
       console.log("2. Deepgram connected!");

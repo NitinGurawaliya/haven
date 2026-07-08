@@ -41,3 +41,6 @@ httpServer.listen(8000, () => {
   console.log("Pipeline running at http://localhost:8000");
   console.log("Open browser — http://localhost:8000");
 });
+
+
+console.log("hello")
