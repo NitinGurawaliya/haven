@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sunno Pipeline Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      max-width: 600px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f9f9f9;
+    }
+    button {
+      padding: 12px 24px;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 8px;
+      border: none;
+      margin: 8px;
+    }
+    #start { background: #22c55e; color: white; }
+    #stop { background: #ef4444; color: white; }
+    #log {
+      margin-top: 20px;
+      padding: 16px;
+      background: white;
+      border: 1px solid #e4e4e7;
+      border-radius: 8px;
+      min-height: 200px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+
+  <h2> Sunno Pipeline Test</h2>
+  <p>Click Start, speak in Hindi/Hinglish, hear Priya respond.</p>
+
+  <button id="start"> Start Speaking</button>
+  <button id="stop" disabled>Stop</button>
+
+  <div id="log">Waiting to start...</div>
+
+  <script>
+    const log = document.getElementById("log");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+
+    let ws;
+    let mediaRecorder;
+    let audioContext;
+
+    function addLog(msg) {
+      log.textContent += "\n" + msg;
+      log.scrollTop = log.scrollHeight;
+    }
+
+
+    startBtn.onclick = async () => {
+  log.textContent = "Connecting...";
+
+  // Connect DIRECTLY to Deepgram from browser
+  // Pass API key via Sec-WebSocket-Protocol header
+  const socket = new WebSocket(
+    "wss://api.deepgram.com/v1/listen?model=nova-2&language=hi&punctuate=true&interim_results=false&endpointing=500",
+    ["token", "ca1ac67b7753998a4461db4d222b992c5bac4d80"]
+  );
+
+  socket.onopen = async () => {
+    addLog("✅ Connected to Deepgram");
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    const mediaRecorder = new MediaRecorder(stream, {
+      mimeType: "audio/webm"
+    });
+
+    mediaRecorder.addEventListener("dataavailable", (event) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(event.data);
+      }
+    });
+
+    mediaRecorder.start(250);
+    addLog("🎙️ Listening — speak now...");
+  };
+
+  socket.onmessage = async (message) => {
+    const received = JSON.parse(message.data);
+    const transcript = received?.channel?.alternatives?.[0]?.transcript;
+
+    if (transcript && received.is_final) {
+      addLog("You said: " + transcript);
+
+      // Send transcript to YOUR server for Groq + Sarvam
+      const ws = new WebSocket("ws://localhost:8000");
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => ws.send(JSON.stringify({ transcript }));
+      ws.onmessage = async (event) => {
+        addLog("🔊 Priya responding...");
+        const audioContext = new AudioContext();
+        const audioBuffer = await audioContext.decodeAudioData(event.data);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+        source.onended = () => addLog("✅ Done — speak again");
+      };
+    }
+  };
+
+  socket.onclose = () => addLog("Deepgram closed");
+  socket.onerror = () => addLog("❌ Deepgram error");
+
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+
+  stopBtn.onclick = () => {
+    socket.close();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  };
+};
+
+    stopBtn.onclick = () => {
+      if (mediaRecorder) mediaRecorder.stop();
+      if (ws) ws.close();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      addLog("⏹️ Stopped");
+    };
+  </script>
+
+</body>
+</html>
