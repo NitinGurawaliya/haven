@@ -3,14 +3,13 @@
     "target": "ES2022",
     "module": "CommonJS",
     "moduleResolution": "node",
-
-    "rootDir": "call-engine/src",
+    "ignoreDeprecations": "6.0",
+    "rootDir": "src",
     "outDir": "./dist",
-
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-
     "types": ["node"]
-  }
+  },
+  "include": ["src/**/*"]
 }

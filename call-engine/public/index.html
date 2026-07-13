@@ -33,10 +33,10 @@
 </head>
 <body>
 
-  <h2> Sunno Pipeline Test</h2>
+  <h2>Sunno Pipeline Test</h2>
   <p>Click Start, speak in Hindi/Hinglish, hear Priya respond.</p>
 
-  <button id="start"> Start Speaking</button>
+  <button id="start">Start Speaking</button>
   <button id="stop" disabled>Stop</button>
 
   <div id="log">Waiting to start...</div>
@@ -47,88 +47,139 @@
     const stopBtn = document.getElementById("stop");
 
     let ws;
-    let mediaRecorder;
+    let mediaStream;
     let audioContext;
+    let processor;
+    let source;
+    let isPlaying = false;
+
+    const SAMPLE_RATE = 16000;
 
     function addLog(msg) {
       log.textContent += "\n" + msg;
       log.scrollTop = log.scrollHeight;
     }
 
-
-    startBtn.onclick = async () => {
-  log.textContent = "Connecting...";
-
-  // Connect DIRECTLY to Deepgram from browser
-  // Pass API key via Sec-WebSocket-Protocol header
-  const socket = new WebSocket(
-    "wss://api.deepgram.com/v1/listen?model=nova-2&language=hi&punctuate=true&interim_results=false&endpointing=500",
-    ["token", "ca1ac67b7753998a4461db4d222b992c5bac4d80"]
-  );
-
-  socket.onopen = async () => {
-    addLog("✅ Connected to Deepgram");
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-    const mediaRecorder = new MediaRecorder(stream, {
-      mimeType: "audio/webm"
-    });
-
-    mediaRecorder.addEventListener("dataavailable", (event) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(event.data);
+    function getAudioContext() {
+      if (!audioContext || audioContext.state === "closed") {
+        audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
       }
-    });
-
-    mediaRecorder.start(250);
-    addLog("🎙️ Listening — speak now...");
-  };
-
-  socket.onmessage = async (message) => {
-    const received = JSON.parse(message.data);
-    const transcript = received?.channel?.alternatives?.[0]?.transcript;
-
-    if (transcript && received.is_final) {
-      addLog("You said: " + transcript);
-
-      // Send transcript to YOUR server for Groq + Sarvam
-      const ws = new WebSocket("ws://localhost:8000");
-      ws.binaryType = "arraybuffer";
-      ws.onopen = () => ws.send(JSON.stringify({ transcript }));
-      ws.onmessage = async (event) => {
-        addLog("🔊 Priya responding...");
-        const audioContext = new AudioContext();
-        const audioBuffer = await audioContext.decodeAudioData(event.data);
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-        source.start();
-        source.onended = () => addLog("✅ Done — speak again");
-      };
+      return audioContext;
     }
-  };
 
-  socket.onclose = () => addLog("Deepgram closed");
-  socket.onerror = () => addLog("❌ Deepgram error");
+    async function playAudio(arrayBuffer) {
+      const ctx = getAudioContext();
+      if (ctx.state === "suspended") await ctx.resume();
 
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
 
-  stopBtn.onclick = () => {
-    socket.close();
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-  };
-};
+      isPlaying = true;
+      addLog("Priya responding...");
 
-    stopBtn.onclick = () => {
-      if (mediaRecorder) mediaRecorder.stop();
-      if (ws) ws.close();
+      return new Promise((resolve) => {
+        source.onended = () => {
+          isPlaying = false;
+          addLog("Done — speak again");
+          resolve();
+        };
+        source.start();
+      });
+    }
+
+    function stopSession() {
+      if (processor) {
+        processor.disconnect();
+        processor.onaudioprocess = null;
+      }
+      processor = null;
+
+      if (source) {
+        source.disconnect();
+      }
+      source = null;
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+      }
+      mediaStream = null;
+
+      if (ws) {
+        ws.close();
+      }
+      ws = null;
+
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      addLog("⏹️ Stopped");
+      addLog("Stopped");
+    }
+
+    startBtn.onclick = async () => {
+      log.textContent = "Connecting...";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${protocol}//${location.host}`);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = async () => {
+        addLog("Connected to server");
+
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const ctx = getAudioContext();
+          if (ctx.state === "suspended") await ctx.resume();
+
+          source = ctx.createMediaStreamSource(mediaStream);
+          processor = ctx.createScriptProcessor(4096, 1, 1);
+
+          processor.onaudioprocess = (event) => {
+            if (ws?.readyState !== WebSocket.OPEN || isPlaying) return;
+
+            const input = event.inputBuffer.getChannelData(0);
+            const pcm = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+              const sample = Math.max(-1, Math.min(1, input[i]));
+              pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+            }
+            ws.send(pcm.buffer);
+          };
+
+          source.connect(processor);
+          processor.connect(ctx.destination);
+          addLog("Listening — speak now...");
+        } catch (err) {
+          addLog("Microphone error: " + err.message);
+          stopSession();
+        }
+      };
+
+      ws.onmessage = async (event) => {
+        if (typeof event.data === "string") {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "transcript") addLog("You said: " + msg.text);
+          if (msg.type === "agent") addLog("Priya: " + msg.text);
+          if (msg.type === "error") addLog("Error: " + msg.message);
+          return;
+        }
+
+        if (!isPlaying) {
+          await playAudio(event.data);
+        }
+      };
+
+      ws.onclose = () => {
+        if (mediaStream) stopSession();
+        else addLog("Disconnected");
+      };
+
+      ws.onerror = () => addLog("Connection error");
     };
+
+    stopBtn.onclick = stopSession;
   </script>
 
 </body>

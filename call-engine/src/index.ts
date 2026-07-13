@@ -7,40 +7,77 @@ import { createDeepgramStream } from "./stt";
 import { getAgentResponse } from "./llm";
 import { textToSpeech } from "./tts";
 
+const PORT = 8000;
+
 const httpServer = http.createServer((req, res) => {
   if (req.url === "/" || req.url === "/index.html") {
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(fs.readFileSync(path.join(__dirname, "../public/index.html")));
+    return;
   }
+
+  res.writeHead(404);
+  res.end("Not found");
 });
 
 const wss = new WebSocketServer({ server: httpServer });
 
-wss.on("connection", async (socket: WebSocket) => {
-  const history: { role: string; content: string }[] = [];
+function sendJson(socket: WebSocket, payload: Record<string, unknown>) {
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(payload));
+  }
+}
 
-  socket.on("message", async (data: Buffer) => {
-    try {
-      const { transcript } = JSON.parse(data.toString());
-      if (!transcript?.trim()) return;
+wss.on("connection", async (socket: WebSocket) => {
+  const history: { role: "user" | "assistant"; content: string }[] = [];
+  let processing = false;
+
+  let deepgram: { socket: WebSocket; disconnect: () => void };
+  try {
+    deepgram = await createDeepgramStream(async (transcript) => {
+      if (processing) return;
+      processing = true;
 
       console.log("User said:", transcript);
-      const agentText = await getAgentResponse(transcript, history);
-      const audioBuffer = await textToSpeech(agentText);
+      sendJson(socket, { type: "transcript", text: transcript });
 
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(audioBuffer);
+      try {
+        const agentText = await getAgentResponse(transcript, history);
+        sendJson(socket, { type: "agent", text: agentText });
+
+        const audioBuffer = await textToSpeech(agentText);
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(audioBuffer);
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Pipeline failed";
+        console.error("Pipeline error:", message);
+        sendJson(socket, { type: "error", message });
+      } finally {
+        processing = false;
       }
-    } catch (err: any) {
-      console.error("Pipeline error:", err.message);
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "STT connection failed";
+    console.error("Deepgram setup error:", message);
+    sendJson(socket, { type: "error", message });
+    socket.close();
+    return;
+  }
+
+  socket.on("message", (data: Buffer, isBinary: boolean) => {
+    if (!isBinary) return;
+    if (deepgram.socket.readyState === WebSocket.OPEN) {
+      deepgram.socket.send(data);
     }
+  });
+
+  socket.on("close", () => {
+    deepgram.disconnect();
   });
 });
 
-httpServer.listen(8000, () => {
-  console.log("Pipeline running at http://localhost:8000");
+httpServer.listen(PORT, () => {
+  console.log(`Pipeline running at http://localhost:${PORT}`);
   console.log("Open browser — http://localhost:8000");
 });
-
-
-console.log("hello")
